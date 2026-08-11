@@ -1,0 +1,14 @@
+# Relatórios de revisão de PR (saída local, não versionada)
+reviews/
+
+# Checkouts temporários de repositórios revisados
+tmp/
+*.worktree/
+
+# Estado local do Claude Code (não deve ser compartilhado entre máquinas)
+.claude/scheduled_tasks.lock
+.claude/settings.local.json
+
+# OS / editor
+.DS_Store
+*.swp
