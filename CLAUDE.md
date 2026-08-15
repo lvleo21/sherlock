@@ -55,17 +55,43 @@ Verifique especificamente:
 - **Documentação** — README, comentários, CHANGELOG, docs/ ou schemas de API foram atualizados de forma condizente com a mudança de comportamento?
 - **Convenções Django/DRF** — models, migrations, querysets, views/serializers da DRF e tasks Celery seguem as boas práticas do framework (ver skills `django-expert`, `django-safe-migration`, `django-celery-expert`, `cdrf-expert`)? Queries N+1, migrations bloqueantes e uso indevido do ORM são achados de alta prioridade.
 
-Cite sempre `arquivo:linha`. Não aponte um problema sem mostrar onde ele está.
+**IMPORTANTE: Cite sempre `arquivo:linha`. Não aponte um problema sem mostrar exatamente onde ele está no código.**
+
+#### Linguagem natural + rigor técnico
+
+Cada achado deve ter **descoberta** (o que está errado), **contexto** (por que importa em termos práticos) e **como corrigir** (passo concreto).
+
+Exemplos:
+
+- ❌ **Evite:** "Query N+1 detectada"
+- ✅ **Prefira:** "Em `views.py:156`, a view carrega usuários sem `select_related('profile')`, causando uma query por usuário. Com 1.000 usuários, isso vira 1.001 queries ao invés de 2. Solução: adicione `.select_related('profile')` na linha 142 onde o queryset é criado."
+
+- ❌ **Evite:** "Falta validação"
+- ✅ **Prefira:** "O serializer em `serializers.py:89` aceita `email` duplicado sem rejeitar. Se dois usuários tiverem o mesmo email, a view vai quebrar no `create()` (linha 91) com IntegrityError não tratado. Teste: adicione um caso que POST email já existente e verifique que retorna 400, não 500."
+
+- ❌ **Evite:** "Código duplicado"
+- ✅ **Prefira:** "As funções `get_user_avatar_url()` em `utils.py:45` e `User.get_avatar()` em `models.py:120` fazem a mesma coisa: buscam o avatar ou retornam uma URL default. Uma delas deveria ser removida, e o código deveria usar apenas a outra em todo o projeto."
 
 ### 3. Formar uma opinião própria
 
-Depois da auditoria, escreva o que você, como revisor, acha que deveria ser feito — não apenas liste problemas. Isso inclui: mergear como está, mergear com ressalvas, pedir mudanças antes do merge, ou rejeitar. Justifique tecnicamente.
+Depois da auditoria, escreva o que você, como revisor, acha que deveria ser feito — não apenas liste problemas. 
+
+**Decisão:** Pode ser mergear agora, mergear com ressalvas, pedir mudanças, ou rejeitar. Cada um tem uma razão:
+
+- **Mergear agora** — não tem achados críticos, testes cobrem bem, documentação está. Um PR limpo.
+- **Mergear com ressalvas** — tem achados menores que não bloqueiam a funcionalidade. Autor pode abrir issue de follow-up.
+- **Pedir mudanças** — tem achados importantes ou críticos que prejudicam qualidade/segurança. O autor deveria corrigir antes de mergear.
+- **Rejeitar** — o PR não resolve o problema que alega, ou a solução é fundamentalmente errada. Merece reconsideração completa.
+
+**Justificativa:** Uma frase ou duas explicando *por quê*. Exemplo: "Pedir mudanças — o IntegrityError não tratado quebra a API. O resto é sólido; as mudanças são 10 minutos de trabalho."
+
+Isso vai direto no **Veredito Final** do relatório.
 
 ### 4. Escrever o relatório em um arquivo `.md`
 
 Todo relatório de revisão deve ser salvo em um arquivo markdown, nunca apenas na resposta de chat. Salve sempre em `reviews/pr-review-<owner>-<repo>-<numero>.md` (crie a pasta `reviews/` na raiz do projeto se ainda não existir).
 
-Estrutura do relatório:
+#### Estrutura do relatório
 
 ```markdown
 # Review: <título do PR> (#<numero>)
@@ -74,43 +100,114 @@ Estrutura do relatório:
 **Autor:** <autor>
 **Branch:** <head> → <base>
 
-## Resumo
+## Resumo Executivo
 
-O que o PR diz que faz vs. o que ele de fato faz.
+Uma ou duas frases: o que o PR alega fazer vs. o que de fato faz. Se faz o que promete, diga. Se não faz ou vai além, descreva a divergência.
+
+**Exemplo:** "O PR alega otimizar queries na view de usuários. De fato, adiciona `select_related('profile')` mas deixa uma query N+1 em feedback que continua não otimizada."
+
+## O Que Está Bem
+
+Reconheça o que o PR faz certo — testes bem estruturados, migrations seguras, documentação clara, etc. Isso encoraja e mostra que não é só crítica.
+
+**Exemplo:** "A cobertura de testes é completa (91%+) e inclui casos de erro. As migrations estão feitas com `SeparateDatabaseAndState` e `AddIndexConcurrently`, sem risco de downtime."
 
 ## Achados
 
+Organize por severidade e cite `arquivo:linha` para tudo. Cada achado tem três partes:
+
 ### Críticos (bloqueiam merge)
-- `arquivo:linha` — descrição do problema, por que importa, como corrigir.
 
-### Importantes (deveriam ser corrigidos)
-- ...
+**1. Título conciso do problema**
 
-### Menores (nice to have)
-- ...
+**Localização:** `arquivo:linha` 
 
-## Regressão e queda de qualidade
-...
+**O que acontece:** Descreva em uma frase simples o que o código faz — não se assume conhecimento da mudança.
 
-## Cobertura de testes
-...
+**Por que importa:** Contexto prático — qual é a consequência dessa mudança no produção? Queima requests? Cai autenticação? Dados inconsistentes?
 
-## Código morto / duplicação / valores mágicos
-...
+**Como corrigir:** Passo concreto, não genérico. Exemplo: "Na linha 156, adicione `.select_related('profile')` onde o queryset é criado" é melhor que "otimize a query".
+
+---
+
+**Exemplo completo:**
+
+**IntegrityError não tratado ao criar usuários**
+
+**Localização:** `views.py:91`
+
+**O que acontece:** O método `create()` chama `User.objects.create_user()` sem verificar se o email já existe. Se dois requests chegarem simultaneamente com o mesmo email, um vai quebrar com `IntegrityError`.
+
+**Por que importa:** Isso vira uma resposta 500 para o usuário, não uma mensagem amigável 400. Quebra o fluxo de registro.
+
+**Como corrigir:** Na linha 85, valide o email antes de criar: 
+```python
+if User.objects.filter(email=request.data['email']).exists():
+    return Response({'email': 'Já registrado'}, status=400)
+```
+Ou use o serializer para fazer a validação (mais DRF way).
+
+### Importantes (deveriam ser corrigidos antes de merge)
+
+Mesmo formato, mas com problemas que não quebram a aplicação imediatamente — code smell, manutenibilidade, segurança menor.
+
+### Menores (nice to have, não bloqueia)
+
+Melhorias que seriam legais mas são opcionais.
+
+---
+
+## Regressão e Queda de Qualidade
+
+- Existem testes que passavam e agora falham?
+- A mudança piora a legibilidade de código existente?
+- A mudança quebra abstrações ou aumenta acoplamento?
+
+Se nada aqui, diga "Nenhuma regressão detectada" para deixar claro que você verificou.
+
+## Cobertura de Testes
+
+- Os caminhos novos têm testes?
+- Casos de borda estão cobertos (null, lista vazia, valores limites)?
+- Testes antigos foram atualizados ou deixaram de fazer sentido?
+
+Se a cobertura está bom, diga explicitamente. Se está ruim, mostre o impacto (exemplo: "A nova feature de retry não tem teste, então se quebrar em produção ninguém vai saber").
 
 ## Documentação
-...
 
-## Recomendação
+- README, CHANGELOG, docstrings ou API docs foram atualizados?
+- Comportamentos que mudaram estão documentados?
+- Valores de configuração novos estão explicados?
+
+## Veredito Final
+
 **Pronto para merge?** Sim / Não / Com ajustes
-**Justificativa:** ...
+
+**Justificativa:** Uma frase ou duas. Exemplo: "Sim, com ajustes — todos os críticos são simples de corrigir (validação de email + um `select_related`). Importantes e menores são nice-to-have e não bloqueiam."
 ```
 
 ## Regras
 
+**Coleta e Rigor:**
 - Sempre buscar o PR real via `gh`, nunca inferir conteúdo a partir do título ou de suposições.
 - Sempre citar `arquivo:linha` para cada achado.
 - Categorizar achados por severidade real — nem tudo é crítico.
-- Reconhecer o que está bem feito, não só listar problemas.
+
+**Linguagem e Tom:**
+- Escrever em **linguagem natural clara**, não jargão técnico hermético. Se você tiver que usar um termo técnico (N+1, IntegrityError, etc.), explique em uma frase o que significa no contexto prático.
+- Cada achado deve responder: **o que está errado** (descoberta), **por que importa** (contexto), **como corrigir** (ação). Não deixe o leitor adivinhar.
+- Evitar uma-liners como "refatore isso" ou "query N+1 aqui". Sempre descrever o impacto real (performance, segurança, manutenibilidade).
+- Usar exemplos de código ou pseudocódigo para deixar claro o que fazer.
+
+**Construção do Relatório:**
+- Reconhecer o que está bem feito, não só listar problemas. Um relatório equilibrado encoraja.
 - Terminar sempre com um veredito claro e uma recomendação de próximos passos.
 - O relatório final é sempre um arquivo `.md` em `reviews/`, entregue além do resumo dado ao usuário no chat.
+- Estrutura: Resumo Executivo → O Que Está Bem → Achados (por severidade) → Regressão/Qualidade → Testes → Documentação → Veredito.
+
+**Evitar:**
+- Jargão sem explicação ("code smell", "tight coupling" sem contexto).
+- Crítica pessoal ou tom condescendente.
+- Listar achados sem linha/arquivo.
+- Misturar descoberta com recomendação (separe com clareza).
+- Deixar ambigüidade: sempre seja específico sobre o que, onde e por quê.
