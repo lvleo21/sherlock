@@ -4,7 +4,7 @@ Instruções para revisão de Pull Requests do GitHub neste projeto (**Sherlock*
 
 ## Contexto do projeto
 
-O Sherlock existe para revisar Pull Requests do GitHub **de projetos Django** com apoio de assistentes de código e skills. O fluxo típico: o usuário cola um link de PR do GitHub e espera uma auditoria completa e independente — avaliando também convenções e boas práticas específicas do Django/DRF — encerrando em um relatório em markdown.
+O Sherlock existe para revisar Pull Requests do GitHub **de projetos Django** com apoio de assistentes de código e skills. O fluxo típico: o usuário cola um link de PR do GitHub e espera uma auditoria independente, avaliando também convenções e boas práticas do Django/DRF. A saída são os **achados**, publicados como uma review no próprio PR do GitHub. Não há veredito nem arquivo de relatório.
 
 Skills instaladas em `.claude/skills/` (via `skills-lock.json`), disponíveis como apoio mas não substituem o processo abaixo. As skills Django/DRF são o núcleo da auditoria; as demais são apoio geral:
 - `django-reviewer` — revisão de mudanças Django/Python focada em clareza, consistência, manutenibilidade e anti-patterns de ORM/DRF, preservando o comportamento existente. Skill principal para qualquer PR revisado pelo Sherlock.
@@ -14,12 +14,13 @@ Skills instaladas em `.claude/skills/` (via `skills-lock.json`), disponíveis co
 - `cdrf-expert` — orientação sobre class-based views do Django REST Framework (APIView, GenericAPIView, mixins, ViewSets, MRO, `create` vs `perform_create` etc.), usando Classy DRF como referência. Útil quando o PR mexe em views/serializers da DRF.
 - `code-review` — revisão em dois eixos (Standards/Spec) de um diff `git`. Assume um checkout local e um ponto fixo (`git diff <fixed-point>...HEAD`); útil se o PR já estiver com checkout local feito.
 - `requesting-code-review` — template para despachar um subagente revisor com contexto isolado (Critical/Important/Minor).
+- `humanizer` — remove marcas de texto gerado por IA da prosa dos achados antes de publicar. Trabalha junto com o markdown da review, sem removê-lo (ver etapa 6).
 
-Nenhuma dessas skills busca o PR no GitHub sozinha — isso é o que este arquivo cobre.
+Nenhuma dessas skills busca o PR no GitHub nem publica a review sozinha — isso é o que este arquivo cobre.
 
 ## Princípio central
 
-**Não confie na descrição do autor do PR.** A descrição, o título e os comentários do autor são hipóteses a verificar, não fatos. A auditoria deve ser feita lendo o diff e o código real, comparando o que o PR *diz* que faz com o que ele *de fato* faz.
+**Não confie na descrição do autor do PR.** A descrição, o título e os comentários do autor são hipóteses a verificar, não fatos. A auditoria deve ser feita lendo o diff e o código real, comparando nos dois sentidos o que o PR *diz* que faz com o que ele *de fato* faz.
 
 ## Processo ao receber um link de PR
 
@@ -28,11 +29,33 @@ Nenhuma dessas skills busca o PR no GitHub sozinha — isso é o que este arquiv
 Use o `gh` CLI (nunca assuma o conteúdo do PR sem buscar):
 
 ```bash
-gh pr view <url> --json number,title,body,author,baseRefName,headRefName,url,additions,deletions,files,commits
+gh pr view <url> --json number,title,body,author,baseRefName,headRefName,headRefOid,url,additions,deletions,files,commits,closingIssuesReferences
 gh pr diff <url>
 ```
 
-Se for necessário rodar testes, buscar código não incluído no diff, ou navegar o repo completo:
+Se o PR fecha uma issue (`closingIssuesReferences`), leia a issue com `gh issue view`: ela faz parte do que o PR promete.
+
+Busque também a thread completa de comentários do PR (reviews, comentários gerais e threads inline com respostas, status de resolvida e de desatualizada). Ela é usada na etapa 5:
+
+```bash
+gh api graphql -F owner=<owner> -F repo=<repo> -F number=<numero> -f query='
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviews(first: 50) { nodes { author { login } state body submittedAt url } }
+      comments(first: 100) { nodes { author { login } body createdAt url } }
+      reviewThreads(first: 100) {
+        nodes {
+          isResolved isOutdated path line
+          comments(first: 50) { nodes { author { login } body createdAt url } }
+        }
+      }
+    }
+  }
+}'
+```
+
+Se for necessário rodar testes, ler arquivos fora do diff ou navegar o repo completo, faça o checkout:
 
 ```bash
 gh pr checkout <url>   # ou gh repo clone <owner>/<repo> se o repo não estiver local
@@ -40,7 +63,33 @@ gh pr checkout <url>   # ou gh repo clone <owner>/<repo> se o repo não estiver 
 
 Faça isso em um diretório separado (ex.: `/tmp` ou um worktree) — nunca dentro deste diretório do Sherlock, que não é o repositório sendo revisado.
 
-### 2. Auditar o código a fundo
+### 2. Conferir o código contra a descrição do PR
+
+Compare o diff com o título, a descrição e a issue vinculada, nos dois sentidos:
+
+- **Mudanças não descritas** — liste tudo o que o diff de fato faz: comportamento novo ou alterado, endpoints, migrations, settings, variáveis de ambiente, dependências, permissões, refatorações, arquivos removidos. Cada item deve estar descrito no PR. O que muda comportamento e não está descrito é um achado, porque quem revisa ou faz deploy não vai saber que aquilo mudou.
+- **Promessas não cumpridas** — cada coisa que a descrição ou a issue diz que o PR faz precisa existir no código. O que foi prometido e não foi implementado, ou foi implementado só em parte, é um achado.
+
+Mudanças puramente mecânicas (formatação, renomear variável local) não precisam estar na descrição.
+
+### 3. Conferir a documentação na versão do PR
+
+Leia a documentação do repositório **como ela fica no head do PR**, não na base, e verifique se ela continua verdadeira depois da mudança. Isso vale também para arquivos que o PR não tocou: um README que não foi alterado pode ter ficado errado justamente porque o código mudou.
+
+Documentos a verificar: `README.md`, `CLAUDE.md`, `AGENTS.md`, `CONTRIBUTING.md`, `CHANGELOG`, `docs/`, `.env.example`, schemas de API (OpenAPI), docstrings e comentários próximos ao código alterado.
+
+Para ler um arquivo na versão do PR sem checkout:
+
+```bash
+gh api "repos/<owner>/<repo>/contents/<caminho>?ref=<headRefOid>" --jq .content | base64 -d
+```
+
+Procure por:
+- comandos, passos de setup, variáveis de ambiente, endpoints, nomes de settings ou de tasks que o PR mudou, renomeou ou removeu, mas que a documentação ainda cita;
+- comportamento novo que deveria estar documentado e não está;
+- instruções para agentes (`CLAUDE.md`, `AGENTS.md`) que contradizem a nova estrutura do código.
+
+### 4. Auditar o código a fundo
 
 Leia o diff completo e o código ao redor (não só as linhas alteradas). Para cada mudança, pergunte: isso faz sentido dado o problema que o PR alega resolver?
 
@@ -52,7 +101,6 @@ Verifique especificamente:
 - **Duplicação desnecessária** — lógica repetida que já existia em outro lugar do código, ou repetida dentro do próprio PR, e que deveria ser extraída.
 - **Valores mágicos hardcoded** — números, strings ou timeouts embutidos direto no código que deveriam virar uma constante nomeada e/ou vir acompanhados de um comentário explicando a origem/motivo do valor.
 - **Cobertura de testes** — os caminhos novos e alterados têm testes reais (não mocks vazios)? Casos de borda relevantes estão cobertos? Testes antigos foram atualizados ou ficaram obsoletos?
-- **Documentação** — README, comentários, CHANGELOG, docs/ ou schemas de API foram atualizados de forma condizente com a mudança de comportamento?
 - **Convenções Django/DRF** — models, migrations, querysets, views/serializers da DRF e tasks Celery seguem as boas práticas do framework (ver skills `django-expert`, `django-safe-migration`, `django-celery-expert`, `cdrf-expert`)? Queries N+1, migrations bloqueantes e uso indevido do ORM são achados de alta prioridade.
 
 **IMPORTANTE: Cite sempre `arquivo:linha`. Não aponte um problema sem mostrar exatamente onde ele está no código.**
@@ -72,119 +120,82 @@ Exemplos:
 - ❌ **Evite:** "Código duplicado"
 - ✅ **Prefira:** "As funções `get_user_avatar_url()` em `utils.py:45` e `User.get_avatar()` em `models.py:120` fazem a mesma coisa: buscam o avatar ou retornam uma URL default. Uma delas deveria ser removida, e o código deveria usar apenas a outra em todo o projeto."
 
-### 3. Formar uma opinião própria
+### 5. Confrontar com a thread de comentários
 
-Depois da auditoria, escreva o que você, como revisor, acha que deveria ser feito — não apenas liste problemas. 
+Leia a thread inteira buscada na etapa 1, incluindo respostas e threads já resolvidas, e confronte cada ponto com os achados da nova revisão e com o código no head do PR:
 
-**Decisão:** Pode ser mergear agora, mergear com ressalvas, pedir mudanças, ou rejeitar. Cada um tem uma razão:
+- **Apontado e corrigido de fato:** não vira achado.
+- **Dado como corrigido, mas o problema continua:** a thread foi resolvida ou o autor respondeu "corrigido", mas o código no head ainda tem o problema. É um achado. Cite o link da thread e mostre em `arquivo:linha` onde o problema continua.
+- **Ainda em aberto e válido:** não crie um comentário duplicado. Liste o link da thread no corpo da review, em "Pontos anteriores ainda em aberto".
+- **Autor justificou a decisão:** leve a justificativa em conta antes de apontar o mesmo ponto. Só reaponte se o código contradizer a justificativa, explicando por quê e citando a thread.
+- **Combinado na thread:** decisões como "fica para outro PR" ou "vou adicionar os testes" são promessas. Verifique se foram cumpridas (a issue foi aberta, os testes existem) e trate o que não foi cumprido como achado.
+- **Correções feitas em resposta a comentários:** audite também os commits que responderam à review anterior. Uma correção pode introduzir um problema novo.
 
-- **Mergear agora** — não tem achados críticos, testes cobrem bem, documentação está. Um PR limpo.
-- **Mergear com ressalvas** — tem achados menores que não bloqueiam a funcionalidade. Autor pode abrir issue de follow-up.
-- **Pedir mudanças** — tem achados importantes ou críticos que prejudicam qualidade/segurança. O autor deveria corrigir antes de mergear.
-- **Rejeitar** — o PR não resolve o problema que alega, ou a solução é fundamentalmente errada. Merece reconsideração completa.
+Ao terminar, cada achado da nova revisão é novo ou traz o link da thread que ele retoma.
 
-**Justificativa:** Uma frase ou duas explicando *por quê*. Exemplo: "Pedir mudanças — o IntegrityError não tratado quebra a API. O resto é sólido; as mudanças são 10 minutos de trabalho."
+### 6. Escrever os achados
 
-Isso vai direto no **Veredito Final** do relatório.
+Só achados. Não há resumo executivo, seção "O que está bem", veredito nem arquivo de relatório.
 
-### 4. Escrever o relatório em um arquivo `.md`
+Cada achado vira um comentário no formato abaixo. A severidade vai no título: **Crítico** (quebra funcionalidade, segurança ou dados; bloqueia o merge), **Importante** (deveria ser corrigido antes do merge) ou **Menor** (opcional).
 
-Todo relatório de revisão deve ser salvo em um arquivo markdown, nunca apenas na resposta de chat. Salve sempre em `reviews/pr-review-<owner>-<repo>-<numero>.md` (crie a pasta `reviews/` na raiz do projeto se ainda não existir).
+````markdown
+**[Crítico] IntegrityError não tratado ao criar usuários**
 
-#### Estrutura do relatório
+**O que acontece:** O método `create()` chama `User.objects.create_user()` sem verificar se o email já existe. Se dois requests chegarem com o mesmo email, um deles quebra com `IntegrityError`.
 
-```markdown
-# Review: <título do PR> (#<numero>)
+**Por que importa:** O usuário recebe um erro 500 em vez de uma mensagem 400 explicando o problema, e o fluxo de cadastro quebra.
 
-**PR:** <url>
-**Autor:** <autor>
-**Branch:** <head> → <base>
-
-## Resumo Executivo
-
-Uma ou duas frases: o que o PR alega fazer vs. o que de fato faz. Se faz o que promete, diga. Se não faz ou vai além, descreva a divergência.
-
-**Exemplo:** "O PR alega otimizar queries na view de usuários. De fato, adiciona `select_related('profile')` mas deixa uma query N+1 em feedback que continua não otimizada."
-
-## O Que Está Bem
-
-Reconheça o que o PR faz certo — testes bem estruturados, migrations seguras, documentação clara, etc. Isso encoraja e mostra que não é só crítica.
-
-**Exemplo:** "A cobertura de testes é completa (91%+) e inclui casos de erro. As migrations estão feitas com `SeparateDatabaseAndState` e `AddIndexConcurrently`, sem risco de downtime."
-
-## Achados
-
-Organize por severidade e cite `arquivo:linha` para tudo. Cada achado tem três partes:
-
-### Críticos (bloqueiam merge)
-
-**1. Título conciso do problema**
-
-**Localização:** `arquivo:linha` 
-
-**O que acontece:** Descreva em uma frase simples o que o código faz — não se assume conhecimento da mudança.
-
-**Por que importa:** Contexto prático — qual é a consequência dessa mudança no produção? Queima requests? Cai autenticação? Dados inconsistentes?
-
-**Como corrigir:** Passo concreto, não genérico. Exemplo: "Na linha 156, adicione `.select_related('profile')` onde o queryset é criado" é melhor que "otimize a query".
-
----
-
-**Exemplo completo:**
-
-**IntegrityError não tratado ao criar usuários**
-
-**Localização:** `views.py:91`
-
-**O que acontece:** O método `create()` chama `User.objects.create_user()` sem verificar se o email já existe. Se dois requests chegarem simultaneamente com o mesmo email, um vai quebrar com `IntegrityError`.
-
-**Por que importa:** Isso vira uma resposta 500 para o usuário, não uma mensagem amigável 400. Quebra o fluxo de registro.
-
-**Como corrigir:** Na linha 85, valide o email antes de criar: 
+**Como corrigir:** Valide o email no serializer:
 ```python
-if User.objects.filter(email=request.data['email']).exists():
-    return Response({'email': 'Já registrado'}, status=400)
+def validate_email(self, value):
+    if User.objects.filter(email=value).exists():
+        raise serializers.ValidationError("Email já registrado.")
+    return value
 ```
-Ou use o serializer para fazer a validação (mais DRF way).
+````
 
-### Importantes (deveriam ser corrigidos antes de merge)
+- Em comentários inline, a localização é a própria linha onde o comentário está ancorado. Cite outras linhas relacionadas como `arquivo:linha`.
+- Quando a correção cabe nas linhas comentadas, use um bloco ` ```suggestion ` do GitHub, que o autor pode aplicar com um clique.
+- Achados que retomam um ponto da thread de comentários trazem o link da thread original.
+- Achados fora do diff (documentação não alterada, promessa não cumprida, mudança não descrita) levam uma linha **Localização:** com `arquivo:linha` e um permalink para o head do PR: `https://github.com/<owner>/<repo>/blob/<headRefOid>/<caminho>#L<inicio>-L<fim>`.
 
-Mesmo formato, mas com problemas que não quebram a aplicação imediatamente — code smell, manutenibilidade, segurança menor.
+#### Humanizer e markdown
 
-### Menores (nice to have, não bloqueia)
+Antes de publicar, passe o texto de cada achado pelo skill `humanizer` no modo *embedded*. O humanizer trabalha **junto** com o markdown da review e nunca o remove:
 
-Melhorias que seriam legais mas são opcionais.
+- **Preservar sempre:** títulos com a severidade (`**[Crítico] ...**`), os rótulos em negrito (**O que acontece:**, **Por que importa:**, **Como corrigir:**, **Localização:**), listas, tabelas, links, permalinks, `arquivo:linha`, código inline, blocos de código e blocos `suggestion`. Nessas estruturas, esta regra tem prioridade sobre os padrões §19 e §20 do humanizer (negrito e títulos).
+- **Reescrever apenas a prosa:** as frases dentro de cada rótulo, removendo frases de efeito, "não é X, é Y", travessões, palavras infladas e fechamentos que repetem o ponto.
+- O humanizer não pode alterar o conteúdo técnico: nomes, números, linhas, trechos de código e a severidade ficam como estão.
 
----
+### 7. Publicar a review no GitHub
 
-## Regressão e Queda de Qualidade
+1. Mostre os achados no chat, em uma lista curta (severidade, título, `arquivo:linha`), e peça confirmação antes de publicar. Publicar é visível para o autor e para o time do repositório.
+2. Após a confirmação, publique **uma única review** com todos os achados. Use sempre `"event": "COMMENT"`: não aprovar nem pedir mudanças, porque o Sherlock não dá veredito.
+3. Monte o JSON fora deste diretório (ex.: `/tmp`) e envie com `gh api`:
 
-- Existem testes que passavam e agora falham?
-- A mudança piora a legibilidade de código existente?
-- A mudança quebra abstrações ou aumenta acoplamento?
-
-Se nada aqui, diga "Nenhuma regressão detectada" para deixar claro que você verificou.
-
-## Cobertura de Testes
-
-- Os caminhos novos têm testes?
-- Casos de borda estão cobertos (null, lista vazia, valores limites)?
-- Testes antigos foram atualizados ou deixaram de fazer sentido?
-
-Se a cobertura está bom, diga explicitamente. Se está ruim, mostre o impacto (exemplo: "A nova feature de retry não tem teste, então se quebrar em produção ninguém vai saber").
-
-## Documentação
-
-- README, CHANGELOG, docstrings ou API docs foram atualizados?
-- Comportamentos que mudaram estão documentados?
-- Valores de configuração novos estão explicados?
-
-## Veredito Final
-
-**Pronto para merge?** Sim / Não / Com ajustes
-
-**Justificativa:** Uma frase ou duas. Exemplo: "Sim, com ajustes — todos os críticos são simples de corrigir (validação de email + um `select_related`). Importantes e menores são nice-to-have e não bloqueiam."
+```bash
+gh api repos/<owner>/<repo>/pulls/<numero>/reviews --method POST --input /tmp/review.json
 ```
+
+```json
+{
+  "commit_id": "<headRefOid>",
+  "event": "COMMENT",
+  "body": "<contagem, achados fora do diff e pontos anteriores em aberto>",
+  "comments": [
+    { "path": "app/views.py", "line": 156, "side": "RIGHT", "body": "<achado>" },
+    { "path": "app/views.py", "start_line": 140, "line": 156, "side": "RIGHT", "body": "<achado em várias linhas>" }
+  ]
+}
+```
+
+- **Comentário inline** (`comments`): achados ligados a linhas que aparecem no diff. `line` é o número da linha no arquivo novo (`side: "RIGHT"`); para linhas removidas, use o número no arquivo antigo com `side: "LEFT"`. Para um trecho, use `start_line` + `line`.
+- **Corpo da review** (`body`): uma linha com a contagem (ex.: "5 achados: 1 crítico, 3 importantes, 1 menor."), os achados que não podem ser ancorados no diff e, se houver, a lista "Pontos anteriores ainda em aberto" com os links das threads (ver etapa 5).
+- Se a API recusar um comentário inline (erro 422, linha fora do diff), mova esse achado para o corpo da review com permalink e publique de novo.
+- Se não houver achados nem pontos anteriores em aberto, não publique nada; diga isso ao usuário no chat.
+
+Ao terminar, responda no chat com o link da review publicada (`html_url` da resposta da API) e a lista curta de achados.
 
 ## Regras
 
@@ -192,18 +203,18 @@ Se a cobertura está bom, diga explicitamente. Se está ruim, mostre o impacto (
 - Sempre buscar o PR real via `gh`, nunca inferir conteúdo a partir do título ou de suposições.
 - Sempre citar `arquivo:linha` para cada achado.
 - Categorizar achados por severidade real — nem tudo é crítico.
+- Ler a thread de comentários inteira e confrontá-la com a nova revisão: não repetir o que já foi apontado e está em aberto, e reapontar (com link) o que foi dado como corrigido mas continua no código.
 
 **Linguagem e Tom:**
 - Escrever em **linguagem natural clara**, não jargão técnico hermético. Se você tiver que usar um termo técnico (N+1, IntegrityError, etc.), explique em uma frase o que significa no contexto prático.
 - Cada achado deve responder: **o que está errado** (descoberta), **por que importa** (contexto), **como corrigir** (ação). Não deixe o leitor adivinhar.
 - Evitar uma-liners como "refatore isso" ou "query N+1 aqui". Sempre descrever o impacto real (performance, segurança, manutenibilidade).
-- Usar exemplos de código ou pseudocódigo para deixar claro o que fazer.
+- Usar exemplos de código, pseudocódigo ou blocos `suggestion` para deixar claro o que fazer.
 
-**Construção do Relatório:**
-- Reconhecer o que está bem feito, não só listar problemas. Um relatório equilibrado encoraja.
-- Terminar sempre com um veredito claro e uma recomendação de próximos passos.
-- O relatório final é sempre um arquivo `.md` em `reviews/`, entregue além do resumo dado ao usuário no chat.
-- Estrutura: Resumo Executivo → O Que Está Bem → Achados (por severidade) → Regressão/Qualidade → Testes → Documentação → Veredito.
+**Saída:**
+- Apenas achados, publicados como uma review `COMMENT` no PR após confirmação do usuário.
+- Sem veredito, sem resumo executivo, sem seção de elogios, sem arquivo de relatório.
+- A prosa passa pelo `humanizer`; o markdown da review é preservado.
 
 **Evitar:**
 - Jargão sem explicação ("code smell", "tight coupling" sem contexto).

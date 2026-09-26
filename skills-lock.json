@@ -37,6 +37,12 @@
       "skillPath": "skills/django-safe-migration/SKILL.md",
       "computedHash": "3c842a595f6d6914e8b5b7b0c8db92c75baf63a228a1ace9e59ecf99776ba0ee"
     },
+    "humanizer": {
+      "source": "blader/humanizer",
+      "sourceType": "github",
+      "skillPath": "SKILL.md",
+      "computedHash": "0a4518725b506f6c83e65f2d6d87cb56fbc042ba92de5eecb1ef8b995ec69d70"
+    },
     "requesting-code-review": {
       "source": "obra/superpowers",
       "sourceType": "github",
