@@ -1,6 +1,3 @@
-# Relatórios de revisão de PR (saída local, não versionada)
-reviews/
-
 # Checkouts temporários de repositórios revisados
 tmp/
 *.worktree/
