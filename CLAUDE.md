@@ -14,6 +14,7 @@ Skills instaladas em `.claude/skills/` (via `skills-lock.json`), disponíveis co
 - `cdrf-expert` — orientação sobre class-based views do Django REST Framework (APIView, GenericAPIView, mixins, ViewSets, MRO, `create` vs `perform_create` etc.), usando Classy DRF como referência. Útil quando o PR mexe em views/serializers da DRF.
 - `code-review` — revisão em dois eixos (Standards/Spec) de um diff `git`. Assume um checkout local e um ponto fixo (`git diff <fixed-point>...HEAD`); útil se o PR já estiver com checkout local feito.
 - `requesting-code-review` — template para despachar um subagente revisor com contexto isolado (Critical/Important/Minor).
+- `humanizer` — remove marcas de texto gerado por IA (frases de efeito, "não é X, é Y", travessões em excesso, palavras infladas). Usar no modo *embedded* sobre a prosa do relatório antes de salvá-lo em `reviews/`, preservando a estrutura do template (títulos de seção e rótulos em negrito como **Localização:**/**O que acontece:**), os `arquivo:linha`, os blocos de código e o conteúdo técnico dos achados.
 
 Nenhuma dessas skills busca o PR no GitHub sozinha — isso é o que este arquivo cobre.
 
@@ -204,6 +205,7 @@ Se a cobertura está bom, diga explicitamente. Se está ruim, mostre o impacto (
 - Terminar sempre com um veredito claro e uma recomendação de próximos passos.
 - O relatório final é sempre um arquivo `.md` em `reviews/`, entregue além do resumo dado ao usuário no chat.
 - Estrutura: Resumo Executivo → O Que Está Bem → Achados (por severidade) → Regressão/Qualidade → Testes → Documentação → Veredito.
+- Antes de salvar, passar a prosa do relatório pelo skill `humanizer` (modo *embedded*), sem alterar a estrutura do template nem o conteúdo técnico.
 
 **Evitar:**
 - Jargão sem explicação ("code smell", "tight coupling" sem contexto).
